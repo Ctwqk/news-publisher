@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>news-publisher</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@400;500;600&display=swap');
+
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+  :root {
+    --bg-0: #08090b;
+    --bg-1: #0f1114;
+    --bg-2: #161921;
+    --bg-3: #1e2230;
+    --border: #252a3a;
+    --border-bright: #333a50;
+    --text-0: #e8ecf4;
+    --text-1: #a0a8c0;
+    --text-2: #6a7190;
+    --accent: #22d67a;
+    --accent-dim: #1a9e5c;
+    --accent-glow: rgba(34,214,122,.12);
+    --warn: #f0a040;
+    --warn-glow: rgba(240,160,64,.12);
+    --error: #f04058;
+    --error-glow: rgba(240,64,88,.12);
+    --blue: #4488ff;
+    --blue-glow: rgba(68,136,255,.1);
+    --mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace;
+    --sans: 'DM Sans', -apple-system, sans-serif;
+    --radius: 6px;
+    --transition: 180ms ease;
+  }
+
+  html { font-size: 14px; }
+
+  body {
+    font-family: var(--mono);
+    background: var(--bg-0);
+    color: var(--text-0);
+    min-height: 100vh;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Grain overlay ── */
+  body::after {
+    content: '';
+    position: fixed; inset: 0;
+    background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── Layout ── */
+  .shell {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 24px 20px 60px;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 20px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .logo-icon {
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent) 0%, #18a060 100%);
+    display: grid; place-items: center;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--bg-0);
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+
+  .logo-text {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 1.14rem;
+    letter-spacing: -0.02em;
+    color: var(--text-0);
+  }
+
+  .logo-text span {
+    color: var(--text-2);
+    font-weight: 400;
+    margin-left: 6px;
+  }
+
+  .header-right {
+    display: flex; align-items: center; gap: 16px;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: .75rem;
+    font-weight: 500;
+    letter-spacing: .02em;
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+  }
+
+  .badge-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .badge--ok .badge-dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .badge--warn .badge-dot { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  .badge--error .badge-dot { background: var(--error); box-shadow: 0 0 6px var(--error); }
+  .badge--off .badge-dot { background: var(--text-2); }
+  .badge--running .badge-dot { background: var(--blue); box-shadow: 0 0 6px var(--blue); animation: pulse 1.2s ease infinite; }
+
+  @keyframes pulse {
+    0%,100% { opacity: 1; }
+    50% { opacity: .35; }
+  }
+
+  /* ── Stat cards ── */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .stat {
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    transition: border-color var(--transition);
+  }
+
+  .stat:hover { border-color: var(--border-bright); }
+
+  .stat-label {
+    font-size: .7rem;
+    font-weight: 500;
+    color: var(--text-2);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    margin-bottom: 6px;
+  }
+
+  .stat-value {
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: var(--text-0);
+    line-height: 1.2;
+  }
+
+  .stat-value.accent { color: var(--accent); }
+  .stat-value.warn { color: var(--warn); }
+  .stat-value.error { color: var(--error); }
+
+  .stat-sub {
+    font-size: .72rem;
+    color: var(--text-2);
+    margin-top: 4px;
+  }
+
+  /* ── Sections ── */
+  .section {
+    margin-bottom: 24px;
+  }
+
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .section-title {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: .92rem;
+    color: var(--text-1);
+    letter-spacing: -.01em;
+  }
+
+  /* ── Actions bar ── */
+  .actions {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 24px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+    color: var(--text-1);
+    font-family: var(--mono);
+    font-size: .78rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition);
+    letter-spacing: .01em;
+  }
+
+  .btn:hover {
+    border-color: var(--border-bright);
+    color: var(--text-0);
+    background: var(--bg-3);
+  }
+
+  .btn--primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg-0);
+  }
+
+  .btn--primary:hover {
+    background: #2ae888;
+    border-color: #2ae888;
+    color: var(--bg-0);
+    box-shadow: 0 0 16px var(--accent-glow);
+  }
+
+  .btn--primary:disabled {
+    opacity: .5;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  .btn--primary:disabled:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  /* ── Config grid ── */
+  .config-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .config-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: var(--bg-1);
+    gap: 12px;
+  }
+
+  .config-key {
+    font-size: .75rem;
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+
+  .config-val {
+    font-size: .8rem;
+    color: var(--text-0);
+    font-weight: 500;
+    text-align: right;
+    word-break: break-all;
+  }
+
+  /* ── Table ── */
+  .table-wrap {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .78rem;
+  }
+
+  thead th {
+    text-align: left;
+    padding: 10px 14px;
+    background: var(--bg-2);
+    color: var(--text-2);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    font-size: .68rem;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background var(--transition);
+  }
+
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--bg-2); }
+
+  td {
+    padding: 9px 14px;
+    background: var(--bg-1);
+    color: var(--text-1);
+    vertical-align: top;
+  }
+
+  td a {
+    color: var(--blue);
+    text-decoration: none;
+    transition: color var(--transition);
+  }
+
+  td a:hover { color: #66aaff; text-decoration: underline; }
+
+  .td-title {
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-0);
+    font-weight: 400;
+  }
+
+  .td-source {
+    color: var(--text-2);
+    font-size: .72rem;
+    font-weight: 500;
+    letter-spacing: .02em;
+  }
+
+  .td-time {
+    white-space: nowrap;
+    color: var(--text-2);
+    font-size: .72rem;
+  }
+
+  .td-id {
+    font-size: .7rem;
+    color: var(--text-2);
+    font-family: var(--mono);
+  }
+
+  .tag-dry {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--warn-glow);
+    color: var(--warn);
+    font-size: .65rem;
+    font-weight: 600;
+    letter-spacing: .03em;
+    margin-left: 6px;
+  }
+
+  /* ── Error banner ── */
+  .error-banner {
+    padding: 12px 16px;
+    border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
+    background: var(--error-glow);
+    border-radius: var(--radius);
+    margin-bottom: 24px;
+    display: none;
+  }
+
+  .error-banner.visible { display: block; }
+
+  .error-banner-label {
+    font-size: .7rem;
+    font-weight: 600;
+    color: var(--error);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-bottom: 4px;
+  }
+
+  .error-banner-msg {
+    font-size: .82rem;
+    color: var(--text-1);
+    word-break: break-all;
+  }
+
+  /* ── Empty state ── */
+  .empty {
+    padding: 32px;
+    text-align: center;
+    color: var(--text-2);
+    font-size: .82rem;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  /* ── Countdown ── */
+  .countdown {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 640px) {
+    .shell { padding: 16px 12px 40px; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    header { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .config-grid { grid-template-columns: 1fr; }
+    .td-title { max-width: 200px; }
+  }
+
+  /* ── Skeleton loading ── */
+  .skeleton {
+    background: linear-gradient(90deg, var(--bg-2) 25%, var(--bg-3) 50%, var(--bg-2) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s ease infinite;
+    border-radius: 4px;
+    height: 1em;
+    display: inline-block;
+    width: 60px;
+  }
+
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  /* ── Refresh indicator ── */
+  .refresh-dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    opacity: 0;
+    transition: opacity .3s;
+  }
+
+  .refresh-dot.active {
+    opacity: 1;
+    animation: pulse .6s ease;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Header -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon">N</div>
+      <div class="logo-text">news-publisher <span id="pub-name">—</span></div>
+    </div>
+    <div class="header-right">
+      <div class="refresh-dot" id="refresh-dot"></div>
+      <div class="badge badge--off" id="status-badge">
+        <div class="badge-dot"></div>
+        <span id="status-text">loading</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Error banner -->
+  <div class="error-banner" id="error-banner">
+    <div class="error-banner-label">Last Error</div>
+    <div class="error-banner-msg" id="error-msg"></div>
+  </div>
+
+  <!-- Actions -->
+  <div class="actions">
+    <button class="btn btn--primary" id="btn-run" disabled>Run Now</button>
+    <button class="btn" id="btn-refresh">Refresh</button>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats" id="stats">
+    <div class="stat">
+      <div class="stat-label">Total Runs</div>
+      <div class="stat-value" id="s-runs"><span class="skeleton"></span></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Total Posted</div>
+      <div class="stat-value accent" id="s-posted"><span class="skeleton"></span></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Errors</div>
+      <div class="stat-value" id="s-errors"><span class="skeleton"></span></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Last Run</div>
+      <div class="stat-value" id="s-last-run"><span class="skeleton"></span></div>
+      <div class="stat-sub" id="s-last-run-sub"></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Next Run</div>
+      <div class="stat-value countdown" id="s-next-run"><span class="skeleton"></span></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Last Fetched</div>
+      <div class="stat-value" id="s-fetched"><span class="skeleton"></span></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Last Posted</div>
+      <div class="stat-value" id="s-last-posted"><span class="skeleton"></span></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Tracked Sent IDs</div>
+      <div class="stat-value" id="s-tracked"><span class="skeleton"></span></div>
+    </div>
+  </div>
+
+  <!-- Config -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title">Configuration</div>
+    </div>
+    <div class="config-grid" id="config-grid"></div>
+  </div>
+
+  <!-- History -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title">Recent Posts</div>
+      <span style="font-size:.72rem;color:var(--text-2)" id="history-count"></span>
+    </div>
+    <div id="history-wrap"></div>
+  </div>
+
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  const $ = (s) => document.querySelector(s);
+  const POLL_INTERVAL = 10_000;
+  let countdownTimer = null;
+  let nextRunMs = 0;
+
+  // ── Fetch helpers ──
+  async function fetchStatus() {
+    const res = await fetch('/api/status');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function fetchHistory() {
+    const res = await fetch('/api/history');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function triggerRun() {
+    const res = await fetch('/api/run', { method: 'POST' });
+    return res.json();
+  }
+
+  // ── Render status ──
+  function renderStatus(d) {
+    $('#pub-name').textContent = d.publisher + (d.dryRun ? ' (dry-run)' : '');
+
+    // Badge
+    const badge = $('#status-badge');
+    const badgeText = $('#status-text');
+    badge.className = 'badge';
+    if (d.isRunning) {
+      badge.classList.add('badge--running');
+      badgeText.textContent = 'running';
+    } else if (d.lastError) {
+      badge.classList.add('badge--error');
+      badgeText.textContent = 'error';
+    } else if (d.totalRuns > 0) {
+      badge.classList.add('badge--ok');
+      badgeText.textContent = 'idle';
+    } else {
+      badge.classList.add('badge--warn');
+      badgeText.textContent = 'waiting';
+    }
+
+    // Error banner
+    const banner = $('#error-banner');
+    if (d.lastError) {
+      banner.classList.add('visible');
+      $('#error-msg').textContent = d.lastError;
+    } else {
+      banner.classList.remove('visible');
+    }
+
+    // Stats
+    $('#s-runs').textContent = d.totalRuns;
+    $('#s-posted').textContent = d.totalPosted;
+
+    const errEl = $('#s-errors');
+    errEl.textContent = d.totalErrors;
+    errEl.className = 'stat-value' + (d.totalErrors > 0 ? ' error' : '');
+
+    if (d.lastRunAt) {
+      $('#s-last-run').textContent = relativeTime(d.lastRunAt);
+      $('#s-last-run-sub').textContent = d.lastRunDurationMs
+        ? `${(d.lastRunDurationMs / 1000).toFixed(1)}s`
+        : '';
+    } else {
+      $('#s-last-run').textContent = '—';
+      $('#s-last-run-sub').textContent = '';
+    }
+
+    $('#s-fetched').textContent = d.lastFetchedCount;
+    $('#s-last-posted').textContent = d.lastPostedCount;
+    $('#s-tracked').textContent = d.sentTracked;
+
+    // Next run countdown
+    if (d.nextRunAt) {
+      nextRunMs = new Date(d.nextRunAt).getTime();
+      updateCountdown();
+    }
+
+    // Config
+    if (d.config) {
+      const grid = $('#config-grid');
+      grid.innerHTML = '';
+      const entries = Object.entries(d.config);
+      for (const [k, v] of entries) {
+        const row = document.createElement('div');
+        row.className = 'config-row';
+        row.innerHTML = `<span class="config-key">${esc(k)}</span><span class="config-val">${esc(String(v))}</span>`;
+        grid.appendChild(row);
+      }
+    }
+
+    // Button state
+    $('#btn-run').disabled = d.isRunning;
+  }
+
+  function updateCountdown() {
+    const el = $('#s-next-run');
+    if (!nextRunMs) { el.textContent = '—'; return; }
+    const diff = nextRunMs - Date.now();
+    if (diff <= 0) { el.textContent = 'now'; return; }
+    const m = Math.floor(diff / 60000);
+    const s = Math.floor((diff % 60000) / 1000);
+    el.textContent = `${m}m ${String(s).padStart(2, '0')}s`;
+  }
+
+  // ── Render history ──
+  function renderHistory(d) {
+    const wrap = $('#history-wrap');
+    const posts = d.posts || [];
+    $('#history-count').textContent = posts.length > 0 ? `${posts.length} items` : '';
+
+    if (posts.length === 0) {
+      wrap.innerHTML = '<div class="empty">No posts yet</div>';
+      return;
+    }
+
+    let html = '<div class="table-wrap"><table><thead><tr>';
+    html += '<th>Time</th><th>Source</th><th>Title</th><th>Platform ID</th>';
+    html += '</tr></thead><tbody>';
+
+    for (const p of posts) {
+      const dry = p.dryRun ? '<span class="tag-dry">DRY</span>' : '';
+      const title = p.link
+        ? `<a href="${esc(p.link)}" target="_blank" rel="noopener">${esc(p.title)}</a>`
+        : esc(p.title);
+      html += `<tr>
+        <td class="td-time">${timeStr(p.postedAt)}</td>
+        <td class="td-source">${esc(p.source)}</td>
+        <td class="td-title">${title}${dry}</td>
+        <td class="td-id">${p.platformId ? esc(p.platformId) : '—'}</td>
+      </tr>`;
+    }
+
+    html += '</tbody></table></div>';
+    wrap.innerHTML = html;
+  }
+
+  // ── Utilities ──
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function relativeTime(iso) {
+    const ms = Date.now() - new Date(iso).getTime();
+    if (ms < 60000) return `${Math.round(ms / 1000)}s ago`;
+    if (ms < 3600000) return `${Math.round(ms / 60000)}m ago`;
+    if (ms < 86400000) return `${(ms / 3600000).toFixed(1)}h ago`;
+    return `${(ms / 86400000).toFixed(1)}d ago`;
+  }
+
+  function timeStr(iso) {
+    try {
+      const d = new Date(iso);
+      return d.toLocaleString('sv-SE', { hour: '2-digit', minute: '2-digit', second: '2-digit', month: '2-digit', day: '2-digit' });
+    } catch { return iso; }
+  }
+
+  function flashRefresh() {
+    const dot = $('#refresh-dot');
+    dot.classList.add('active');
+    setTimeout(() => dot.classList.remove('active'), 600);
+  }
+
+  // ── Poll loop ──
+  async function refresh() {
+    try {
+      const [status, history] = await Promise.all([fetchStatus(), fetchHistory()]);
+      renderStatus(status);
+      renderHistory(history);
+      flashRefresh();
+    } catch (e) {
+      console.error('[Dashboard] Refresh failed:', e);
+    }
+  }
+
+  // ── Init ──
+  refresh();
+  setInterval(refresh, POLL_INTERVAL);
+  countdownTimer = setInterval(updateCountdown, 1000);
+
+  $('#btn-run').addEventListener('click', async () => {
+    const btn = $('#btn-run');
+    btn.disabled = true;
+    btn.textContent = 'Running…';
+    try {
+      await triggerRun();
+      setTimeout(refresh, 1500);
+    } catch (e) {
+      console.error('[Dashboard] Trigger failed:', e);
+    } finally {
+      setTimeout(() => {
+        btn.textContent = 'Run Now';
+        btn.disabled = false;
+      }, 3000);
+    }
+  });
+
+  $('#btn-refresh').addEventListener('click', () => refresh());
+})();
+</script>
+</body>
+</html>
