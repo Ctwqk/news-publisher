@@ -1,18 +1,28 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { createServer } from 'node:http';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
 import { validatePublisher } from '../publishers/_interface.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/* ------------------------------------------------------------------ */
-/*  CLI args                                                          */
-/* ------------------------------------------------------------------ */
+const CACHE_KEY = 'worldmonitor:hourly-news:latest';
+const MAX_RECENT_POSTS = 120;
+const DEFAULT_CHANNELS = ['x', 'discord'];
+const DEFAULT_CHANNEL_LIMITS = {
+  x: 5,
+  discord: 15,
+};
+const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
@@ -20,42 +30,29 @@ if (args.help) {
   process.exit(0);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Config                                                            */
-/* ------------------------------------------------------------------ */
-
-const publisherName = (args.publisher || process.env.NP_PUBLISHER || '').trim();
-if (!publisherName) {
-  console.error('[Publisher] Missing --publisher or NP_PUBLISHER env var');
+const configuredChannels = parseChannels(args.channels || process.env.NP_CHANNELS || DEFAULT_CHANNELS.join(','));
+if (configuredChannels.length === 0) {
+  console.error('[Publisher] No channels configured. Set NP_CHANNELS to at least one channel.');
   process.exit(1);
 }
 
-const intervalMinutes = clampNumber(
-  Number(args['interval-minutes'] ?? process.env.NP_INTERVAL_MINUTES ?? 60),
-  5,
-  24 * 60,
-  60,
-);
-
-const dashboardPort = Number(args['dashboard-port'] || process.env.NP_DASHBOARD_PORT || 0);
-
 const config = {
-  publisherName,
   newsApiBase: normalizeBaseUrl(process.env.NP_NEWS_API_BASE || ''),
-  newsLimit: clampNumber(Number(process.env.NP_NEWS_LIMIT || 100), 1, 100, 100),
-  newsPage: clampNumber(Number(process.env.NP_NEWS_PAGE || 1), 1, 1000, 1),
+  newsLimit: clampNumber(Number(args['news-limit'] ?? process.env.NP_NEWS_LIMIT ?? 100), 1, 100, 100),
+  newsPage: clampNumber(Number(args['news-page'] ?? process.env.NP_NEWS_PAGE ?? 1), 1, 1000, 1),
   newsSearchBody: parseJsonObjectEnv(process.env.NP_NEWS_SEARCH_BODY),
-  maxPostItems: clampNumber(Number(process.env.NP_MAX_POST_ITEMS || 5), 1, 50, 5),
-  lookbackHours: clampNumber(Number(process.env.NP_LOOKBACK_HOURS || 24), 1, 24 * 14, 24),
-  retainHours: clampNumber(Number(process.env.NP_RETAIN_HOURS || 24 * 7), 24, 24 * 600, 24 * 7),
-  intervalMinutes,
-  statePath: resolve(
-    process.cwd(),
-    args['state-path'] ||
-      process.env.NP_STATE_PATH ||
-      `data/${publisherName}-state.json`,
-  ),
-  dryRun: Boolean(args['dry-run'] || process.env.NP_DRY_RUN),
+  lookbackHours: clampNumber(Number(args['lookback-hours'] ?? process.env.NP_LOOKBACK_HOURS ?? 24), 1, 24 * 14, 24),
+  retainHours: clampNumber(Number(args['retain-hours'] ?? process.env.NP_RETAIN_HOURS ?? 24 * 7), 24, 24 * 600, 24 * 7),
+  statePath: resolve(ROOT_DIR, args['state-path'] || process.env.NP_STATE_PATH || 'data/distributor-state.json'),
+  historyPath: resolve(ROOT_DIR, args['history-path'] || process.env.NP_HISTORY_PATH || 'data/distributor-history.json'),
+  lockPath: resolve(ROOT_DIR, args['lock-path'] || process.env.NP_LOCK_PATH || 'data/distributor-run.lock'),
+  dryRun: isTruthy(args['dry-run'] || process.env.NP_DRY_RUN),
+  channels: configuredChannels.map((name) => buildChannelConfig(name, args)),
+  cache: {
+    enabled: !isFalsey(process.env.NP_CACHE_ENABLED),
+    maxItems: clampNumber(Number(args['cache-max-items'] ?? process.env.NP_CACHE_MAX_ITEMS ?? 15), 1, 50, 15),
+    path: resolve(ROOT_DIR, args['cache-path'] || process.env.NP_CACHE_PATH || 'data/hourly-news-cache.json'),
+  },
 };
 
 if (!config.newsApiBase) {
@@ -63,285 +60,202 @@ if (!config.newsApiBase) {
   process.exit(1);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Runtime state (shared with dashboard)                             */
-/* ------------------------------------------------------------------ */
-
-const runtime = {
-  startedAt: Date.now(),
-  lastRunAt: 0,
-  lastRunDurationMs: 0,
-  lastPostedCount: 0,
-  lastFetchedCount: 0,
-  totalRuns: 0,
-  totalPosted: 0,
-  totalErrors: 0,
-  isRunning: false,
-  lastError: null,
-  recentPosts: [],      // last N posts: { id, title, source, link, postedAt, platformId }
-};
-
-const MAX_RECENT_POSTS = 50;
-
-/* ------------------------------------------------------------------ */
-/*  Load publisher                                                    */
-/* ------------------------------------------------------------------ */
-
-const publisherPath = resolve(__dirname, '..', 'publishers', `${publisherName}.mjs`);
-if (!existsSync(publisherPath)) {
-  console.error(`[Publisher] Publisher module not found: publishers/${publisherName}.mjs`);
-  process.exit(1);
-}
-
-const publisher = await import(publisherPath);
-validatePublisher(publisher, publisherName);
-publisher.validateConfig();
-
-console.log(`[Publisher] Loaded publisher: ${publisherName}`);
-
-/* ------------------------------------------------------------------ */
-/*  Dashboard server                                                  */
-/* ------------------------------------------------------------------ */
-
-if (dashboardPort > 0) {
-  startDashboard(dashboardPort);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Main loop                                                         */
-/* ------------------------------------------------------------------ */
-
-if (args.loop) {
-  await runOnce(config, publisher);
-  setInterval(() => {
-    runOnce(config, publisher).catch((err) =>
-      console.error('[Publisher] Loop run failed:', err?.message || err),
-    );
-  }, intervalMinutes * 60 * 1000);
-  console.log(`[Publisher] Loop started. Interval: ${intervalMinutes} minutes`);
-} else {
-  const ok = await runOnce(config, publisher);
-  if (!dashboardPort) process.exit(ok ? 0 : 1);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Core pipeline                                                     */
-/* ------------------------------------------------------------------ */
-
-async function runOnce(config, publisher) {
-  if (runtime.isRunning) {
-    console.warn('[Publisher] Already running, skipping');
-    return false;
+const publishers = await loadPublishers(config.channels);
+for (const channel of config.channels) {
+  const entry = publishers.get(channel.name);
+  validatePublisher(entry.mod, channel.name);
+  if (!channel.enabled) {
+    console.log(`[Publisher] Skipping validation for disabled channel: ${channel.name}`);
+    continue;
   }
-  runtime.isRunning = true;
+  await entry.mod.validateConfig(channel);
+}
+console.log(`[Publisher] Loaded channels: ${config.channels.map((channel) => channel.name).join(', ')}`);
+
+const ok = await runOnce(config, publishers);
+process.exit(ok ? 0 : 1);
+
+async function runOnce(config, publishers) {
+  let releaseLock = null;
   const startedAt = Date.now();
 
   try {
-    // 1. Fetch news from API
+    releaseLock = acquireLock(config.lockPath);
+  } catch (err) {
+    console.warn(`[Publisher] ${err.message}`);
+    return false;
+  }
+
+  const state = loadState(config);
+  const history = loadHistory(config.historyPath);
+
+  state.lastError = null;
+  syncStateConfig(state, config);
+  state.totalRuns += 1;
+
+  try {
     const { items, endpoint } = await fetchNewsItems(config);
     console.log(`[Publisher] Loaded ${items.length} items from ${endpoint}`);
-    runtime.lastFetchedCount = items.length;
 
-    // 2. Load & prune state
-    const state = loadState(config.statePath);
+    const now = Date.now();
     pruneState(state, config.retainHours);
 
-    // 3. Dedupe, filter, select
-    const now = Date.now();
-    const lookbackMs = config.lookbackHours * 60 * 60 * 1000;
-    const selected = items
-      .filter((item) => now - item.pubDateMs <= lookbackMs)
-      .filter((item) => !state.sent[item.id])
-      .sort((a, b) => b.pubDateMs - a.pubDateMs)
-      .slice(0, config.maxPostItems);
-
-    if (selected.length === 0) {
-      console.log('[Publisher] No new items to post');
-      runtime.lastRunAt = now;
-      runtime.lastRunDurationMs = Date.now() - startedAt;
-      runtime.lastPostedCount = 0;
-      runtime.totalRuns += 1;
-      runtime.lastError = null;
-      return true;
-    }
-
-    // 4. Format via publisher
-    const payloadItems = selected.map((item) => ({
-      id: item.id,
-      source: item.source,
-      title: item.title,
-      link: item.link,
-      pubDate: new Date(item.pubDateMs).toISOString(),
-    }));
-
-    const formatted = publisher.formatItems(payloadItems);
-
-    // 5. Post each payload
-    let posted = 0;
-    for (const payload of formatted) {
-      const result = await publisher.post(payload, { dryRun: config.dryRun });
-      if (result.ok) {
-        posted += 1;
-        if (payload.itemId) {
-          state.sent[payload.itemId] = now;
-        }
-        // Track in recent posts
-        const matchedItem = selected.find((s) => s.id === payload.itemId);
-        runtime.recentPosts.unshift({
-          id: payload.itemId || '',
-          title: matchedItem?.title || payload.text?.slice(0, 80) || '',
-          source: matchedItem?.source || '',
-          link: matchedItem?.link || '',
-          postedAt: new Date(now).toISOString(),
-          platformId: result.id || null,
-          dryRun: config.dryRun,
-        });
-        if (runtime.recentPosts.length > MAX_RECENT_POSTS) {
-          runtime.recentPosts.length = MAX_RECENT_POSTS;
-        }
-        if (result.id) {
-          console.log(`[Publisher] Posted (id=${result.id})`);
-        }
-      } else {
-        runtime.totalErrors += 1;
-        console.warn(`[Publisher] Post failed: ${result.error || 'unknown'}`);
-        if (result.error === 'rate_limited') {
-          console.warn('[Publisher] Rate limited — skipping remaining items this run');
-          break;
-        }
-      }
-    }
-
-    // Mark all selected items as sent
-    for (const item of selected) {
-      if (!state.sent[item.id]) {
-        state.sent[item.id] = now;
-      }
-    }
+    const eligible = items
+      .filter((item) => now - item.pubDateMs <= config.lookbackHours * 60 * 60 * 1000)
+      .sort((a, b) => b.pubDateMs - a.pubDateMs);
 
     state.lastRunAt = now;
-    state.lastPostedCount = posted;
-    writeJson(config.statePath, state);
+    state.lastRunDurationMs = Date.now() - startedAt;
+    state.lastFetchedCount = items.length;
+    state.lastEligibleCount = eligible.length;
+    state.lastError = null;
 
-    runtime.lastRunAt = now;
-    runtime.lastRunDurationMs = Date.now() - startedAt;
-    runtime.lastPostedCount = posted;
-    runtime.totalPosted += posted;
-    runtime.totalRuns += 1;
-    runtime.lastError = null;
+    const cachePayload = buildCachePayload(eligible, items.length, config);
+    if (config.cache.enabled) {
+      writeJson(config.cache.path, cachePayload);
+      await writeRemoteCache(cachePayload);
+      state.cache.lastGeneratedAt = cachePayload.generatedAt;
+      state.cache.postedItemCount = cachePayload.postedItemCount;
+      state.cache.lastPath = config.cache.path;
+    }
+
+    for (const channelConfig of config.channels) {
+      const channelState = state.channels[channelConfig.name];
+      channelState.enabled = channelConfig.enabled;
+      channelState.dryRun = channelConfig.dryRun;
+      channelState.maxPostItems = channelConfig.maxPostItems;
+
+      if (!channelConfig.enabled) {
+        channelState.lastPostedCount = 0;
+        channelState.lastSkippedReason = 'disabled';
+        continue;
+      }
+
+      const pendingItems = eligible
+        .filter((item) => !channelState.sent[item.id])
+        .slice(0, channelConfig.maxPostItems);
+
+      channelState.lastRunAt = new Date(now).toISOString();
+      channelState.lastError = null;
+      channelState.lastSkippedReason = '';
+      channelState.lastSelectedCount = pendingItems.length;
+
+      if (pendingItems.length === 0) {
+        channelState.lastPostedCount = 0;
+        console.log(`[Publisher] Channel ${channelConfig.name}: no new items`);
+        continue;
+      }
+
+      const payloadItems = pendingItems.map((item) => ({
+        id: item.id,
+        source: item.source,
+        title: item.title,
+        link: item.link,
+        summary: item.summary,
+        pubDate: new Date(item.pubDateMs).toISOString(),
+      }));
+
+      const publisher = publishers.get(channelConfig.name).mod;
+      const payloads = publisher.formatItems(payloadItems, {
+        channel: channelConfig.name,
+        generatedAt: cachePayload.generatedAt,
+      });
+
+      let postedCount = 0;
+      for (const payload of payloads) {
+        const result = await publisher.post(payload, {
+          dryRun: channelConfig.dryRun,
+          channel: channelConfig.name,
+        });
+        const itemIds = Array.isArray(payload.itemIds)
+          ? payload.itemIds.filter(Boolean)
+          : payload.itemId ? [payload.itemId] : [];
+
+        if (!result.ok) {
+          channelState.lastError = result.error || 'unknown error';
+          channelState.totalErrors += 1;
+          state.totalErrors += 1;
+          console.warn(`[Publisher] Channel ${channelConfig.name} failed: ${channelState.lastError}`);
+          continue;
+        }
+
+        for (const itemId of itemIds) {
+          channelState.sent[itemId] = now;
+        }
+
+        postedCount += itemIds.length || 1;
+        channelState.totalPosted += itemIds.length || 1;
+        history.unshift({
+          channel: channelConfig.name,
+          title: String(payload.title || payload.text || '').trim().slice(0, 200),
+          source: String(payload.source || (itemIds.length > 1 ? 'digest' : pendingItems.find((item) => item.id === itemIds[0])?.source || '')).trim(),
+          link: String(payload.link || (itemIds.length === 1 ? pendingItems.find((item) => item.id === itemIds[0])?.link || '' : '')).trim(),
+          itemCount: itemIds.length || 1,
+          itemIds,
+          postedAt: new Date(now).toISOString(),
+          platformId: result.id || null,
+          dryRun: channelConfig.dryRun,
+        });
+      }
+
+      channelState.lastPostedCount = postedCount;
+    }
+
+    history.length = Math.min(history.length, MAX_RECENT_POSTS);
+    writeJson(config.statePath, state);
+    writeJson(config.historyPath, history);
 
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-    console.log(`[Publisher] Done: ${posted}/${selected.length} posted in ${elapsed}s`);
+    console.log(`[Publisher] Done in ${elapsed}s`);
     return true;
   } catch (err) {
-    runtime.totalErrors += 1;
-    runtime.totalRuns += 1;
-    runtime.lastRunAt = Date.now();
-    runtime.lastRunDurationMs = Date.now() - startedAt;
-    runtime.lastError = err?.message || String(err);
-    console.error('[Publisher] Run failed:', err?.message || err);
+    state.lastRunAt = Date.now();
+    state.lastRunDurationMs = Date.now() - startedAt;
+    state.totalErrors += 1;
+    state.lastError = err?.message || String(err);
+    writeJson(config.statePath, state);
+    writeJson(config.historyPath, history);
+    console.error('[Publisher] Run failed:', state.lastError);
     return false;
   } finally {
-    runtime.isRunning = false;
+    if (releaseLock) {
+      releaseLock();
+    }
   }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Dashboard HTTP server                                             */
-/* ------------------------------------------------------------------ */
+function buildChannelConfig(name, args) {
+  const upper = name.toUpperCase().replace(/-/g, '_');
+  const enabled = !isFalsey(process.env[`NP_${upper}_ENABLED`]);
+  const explicitDryRun = process.env[`NP_${upper}_DRY_RUN`];
+  const maxDefault = DEFAULT_CHANNEL_LIMITS[name] || 5;
+  const maxPostItems = clampNumber(
+    Number(args[`${name}-max-items`] ?? process.env[`NP_${upper}_MAX_POST_ITEMS`] ?? maxDefault),
+    1,
+    50,
+    maxDefault,
+  );
 
-function startDashboard(port) {
-  const dashboardHtmlPath = resolve(__dirname, '..', 'dashboard', 'index.html');
+  const dryRun = name === 'discord'
+    ? (isTruthy(explicitDryRun) || isTruthy(args['dry-run'] || process.env.NP_DRY_RUN) || !getDiscordWebhookUrl())
+    : isTruthy(explicitDryRun) || isTruthy(args['dry-run'] || process.env.NP_DRY_RUN);
 
-  const server = createServer(async (req, res) => {
-    const url = new URL(req.url, `http://localhost:${port}`);
-    const path = url.pathname;
-
-    // CORS headers for local dev
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    try {
-      if (path === '/api/status') {
-        const state = loadState(config.statePath);
-        const sentCount = Object.keys(state.sent).length;
-        const nextRunAt = runtime.lastRunAt > 0
-          ? runtime.lastRunAt + config.intervalMinutes * 60 * 1000
-          : runtime.startedAt + config.intervalMinutes * 60 * 1000;
-
-        json(res, {
-          publisher: config.publisherName,
-          dryRun: config.dryRun,
-          isRunning: runtime.isRunning,
-          uptime: Date.now() - runtime.startedAt,
-          lastRunAt: runtime.lastRunAt ? new Date(runtime.lastRunAt).toISOString() : null,
-          lastRunDurationMs: runtime.lastRunDurationMs,
-          lastFetchedCount: runtime.lastFetchedCount,
-          lastPostedCount: runtime.lastPostedCount,
-          nextRunAt: new Date(nextRunAt).toISOString(),
-          totalRuns: runtime.totalRuns,
-          totalPosted: runtime.totalPosted,
-          totalErrors: runtime.totalErrors,
-          lastError: runtime.lastError,
-          sentTracked: sentCount,
-          config: {
-            newsApiBase: config.newsApiBase,
-            maxPostItems: config.maxPostItems,
-            lookbackHours: config.lookbackHours,
-            intervalMinutes: config.intervalMinutes,
-            retainHours: config.retainHours,
-          },
-        });
-      } else if (path === '/api/history') {
-        json(res, { posts: runtime.recentPosts });
-      } else if (path === '/api/run' && req.method === 'POST') {
-        if (runtime.isRunning) {
-          json(res, { ok: false, error: 'Already running' }, 409);
-        } else {
-          // Fire and forget — respond immediately
-          runOnce(config, publisher).catch((err) =>
-            console.error('[Publisher] Manual run failed:', err?.message || err),
-          );
-          json(res, { ok: true, message: 'Run triggered' });
-        }
-      } else if (path === '/' || path === '/index.html') {
-        if (existsSync(dashboardHtmlPath)) {
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(readFileSync(dashboardHtmlPath, 'utf8'));
-        } else {
-          res.writeHead(404, { 'Content-Type': 'text/plain' });
-          res.end('Dashboard HTML not found');
-        }
-      } else {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end('Not found');
-      }
-    } catch (err) {
-      console.error('[Dashboard] Error:', err?.message || err);
-      json(res, { error: 'Internal server error' }, 500);
-    }
-  });
-
-  server.listen(port, '0.0.0.0', () => {
-    console.log(`[Dashboard] Listening on http://0.0.0.0:${port}`);
-  });
+  return {
+    name,
+    enabled,
+    dryRun,
+    maxPostItems,
+  };
 }
 
-function json(res, data, status = 200) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data));
+async function loadPublishers(channels) {
+  const loaded = new Map();
+  for (const channel of channels) {
+    const mod = await import(resolve(ROOT_DIR, 'publishers', `${channel.name}.mjs`));
+    loaded.set(channel.name, { name: channel.name, mod });
+  }
+  return loaded;
 }
-
-/* ------------------------------------------------------------------ */
-/*  News API fetcher                                                  */
-/* ------------------------------------------------------------------ */
 
 async function fetchNewsItems(config) {
   const endpoint = `${config.newsApiBase}/open/news_search`;
@@ -355,7 +269,7 @@ async function fetchNewsItems(config) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'User-Agent': 'NewsPublisher/1.0',
+      'User-Agent': 'NewsPublisher/2.0',
     },
     body: JSON.stringify(requestBody),
   });
@@ -368,7 +282,6 @@ async function fetchNewsItems(config) {
   const payload = await response.json();
   const rows = Array.isArray(payload?.data) ? payload.data : [];
   const items = rows.map((row) => mapNewsItem(row)).filter(Boolean);
-
   return { items, endpoint };
 }
 
@@ -377,9 +290,7 @@ function mapNewsItem(row) {
   if (!title) return null;
 
   const link = String(row?.link || '').trim();
-  const source = String(
-    row?.newsType || row?.engineType || safeHostname(link) || 'news',
-  ).trim();
+  const source = String(row?.newsType || row?.engineType || safeHostname(link) || 'news').trim();
   const identity = String(row?.id || `${source}|${link || title}`).trim();
   if (!identity) return null;
 
@@ -388,36 +299,177 @@ function mapNewsItem(row) {
     source,
     title,
     link,
+    summary: String(row?.summary || row?.abstract || '').trim(),
     pubDateMs: parseDateMs(row?.ts),
   };
 }
 
-/* ------------------------------------------------------------------ */
-/*  State management                                                  */
-/* ------------------------------------------------------------------ */
+function loadState(config) {
+  const base = {
+    lastRunAt: 0,
+    lastRunDurationMs: 0,
+    lastFetchedCount: 0,
+    lastEligibleCount: 0,
+    totalRuns: 0,
+    totalErrors: 0,
+    lastError: null,
+    cache: {
+      lastGeneratedAt: null,
+      postedItemCount: 0,
+      lastPath: config.cache.path,
+    },
+    channels: {},
+  };
 
-function loadState(statePath) {
-  if (!existsSync(statePath)) {
-    return { lastRunAt: 0, lastPostedCount: 0, sent: {} };
+  if (!existsSync(config.statePath)) {
+    syncStateConfig(base, config);
+    return base;
   }
+
   try {
-    const parsed = JSON.parse(readFileSync(statePath, 'utf8'));
-    return {
-      lastRunAt: Number(parsed?.lastRunAt || 0),
-      lastPostedCount: Number(parsed?.lastPostedCount || 0),
-      sent: typeof parsed?.sent === 'object' && parsed.sent ? parsed.sent : {},
+    const parsed = JSON.parse(readFileSync(config.statePath, 'utf8'));
+    const merged = {
+      ...base,
+      ...parsed,
+      cache: {
+        ...base.cache,
+        ...(parsed?.cache || {}),
+      },
+      channels: typeof parsed?.channels === 'object' && parsed.channels ? parsed.channels : {},
     };
+    syncStateConfig(merged, config);
+    return merged;
   } catch {
-    return { lastRunAt: 0, lastPostedCount: 0, sent: {} };
+    syncStateConfig(base, config);
+    return base;
+  }
+}
+
+function syncStateConfig(state, config) {
+  for (const channel of config.channels) {
+    const current = state.channels[channel.name] || {};
+    state.channels[channel.name] = {
+      enabled: channel.enabled,
+      dryRun: channel.dryRun,
+      maxPostItems: channel.maxPostItems,
+      lastRunAt: current.lastRunAt || null,
+      lastPostedCount: Number(current.lastPostedCount || 0),
+      lastSelectedCount: Number(current.lastSelectedCount || 0),
+      totalPosted: Number(current.totalPosted || 0),
+      totalErrors: Number(current.totalErrors || 0),
+      lastError: current.lastError || null,
+      lastSkippedReason: current.lastSkippedReason || '',
+      sent: typeof current.sent === 'object' && current.sent ? current.sent : {},
+    };
   }
 }
 
 function pruneState(state, retainHours) {
   const cutoff = Date.now() - retainHours * 60 * 60 * 1000;
-  for (const [key, ts] of Object.entries(state.sent)) {
-    if (!Number.isFinite(Number(ts)) || Number(ts) < cutoff) {
-      delete state.sent[key];
+  for (const channelState of Object.values(state.channels)) {
+    for (const [key, ts] of Object.entries(channelState.sent || {})) {
+      if (!Number.isFinite(Number(ts)) || Number(ts) < cutoff) {
+        delete channelState.sent[key];
+      }
     }
+  }
+}
+
+function loadHistory(historyPath) {
+  if (!existsSync(historyPath)) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(historyPath, 'utf8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildCachePayload(eligibleItems, fetchedItemCount, config) {
+  const now = new Date().toISOString();
+  const selected = eligibleItems.slice(0, config.cache.maxItems);
+  return {
+    generatedAt: now,
+    fetchedAt: now,
+    fetchedFeedCount: 1,
+    fetchedItemCount,
+    postedItemCount: selected.length,
+    sourceMode: 'news-api',
+    items: selected.map((item) => ({
+      id: item.id,
+      source: item.source,
+      title: item.title,
+      link: item.link,
+      pubDate: new Date(item.pubDateMs).toISOString(),
+    })),
+  };
+}
+
+async function writeRemoteCache(payload) {
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) {
+    return;
+  }
+
+  try {
+    const endpoint = `${url.replace(/\/$/, '')}/set/${encodeURIComponent(CACHE_KEY)}`;
+    await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify([JSON.stringify(payload), 'EX', 60 * 60 * 24 * 3]),
+    });
+  } catch (err) {
+    console.warn('[Publisher] Upstash cache write failed:', err?.message || String(err));
+  }
+}
+
+function acquireLock(lockPath) {
+  mkdirSync(dirname(lockPath), { recursive: true });
+
+  if (existsSync(lockPath)) {
+    try {
+      const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+      if (Number.isInteger(lock?.pid) && processExists(lock.pid)) {
+        throw new Error(`Another publisher run is active (pid=${lock.pid})`);
+      }
+      unlinkSync(lockPath);
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        unlinkSync(lockPath);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  const fd = openSync(lockPath, 'wx');
+  writeFileSync(fd, JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  }, null, 2));
+  closeSync(fd);
+
+  return () => {
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // best effort
+    }
+  };
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -426,9 +478,9 @@ function writeJson(path, payload) {
   writeFileSync(path, JSON.stringify(payload, null, 2), 'utf8');
 }
 
-/* ------------------------------------------------------------------ */
-/*  Utilities                                                         */
-/* ------------------------------------------------------------------ */
+function getDiscordWebhookUrl() {
+  return String(process.env.NP_DISCORD_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL || process.env.WM_DISCORD_WEBHOOK_URL || '').trim();
+}
 
 function safeHostname(url) {
   try {
@@ -445,15 +497,6 @@ function parseDateMs(raw) {
   const ms = Date.parse(raw);
   if (Number.isFinite(ms)) return ms;
   return Date.now();
-}
-
-function stableHash(input) {
-  let hash = 2166136261;
-  for (let i = 0; i < input.length; i += 1) {
-    hash ^= input.charCodeAt(i);
-    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-  }
-  return (hash >>> 0).toString(36);
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -474,37 +517,45 @@ function parseJsonObjectEnv(value) {
     const parsed = JSON.parse(trimmed);
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch (error) {
-    console.warn(
-      '[Publisher] Failed to parse NP_NEWS_SEARCH_BODY:',
-      error?.message || String(error),
-    );
+    console.warn('[Publisher] Failed to parse NP_NEWS_SEARCH_BODY:', error?.message || String(error));
     return {};
   }
 }
 
+function parseChannels(raw) {
+  return [...new Set(String(raw || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean))];
+}
+
+function isTruthy(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
+function isFalsey(value) {
+  return ['0', 'false', 'no', 'off'].includes(String(value || '').trim().toLowerCase());
+}
+
 function parseArgs(argv) {
   const out = {};
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i];
-    if (token === '--loop') {
-      out.loop = true;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === '--help' || token === '-h') {
+      out.help = true;
       continue;
     }
     if (token === '--dry-run') {
       out['dry-run'] = true;
       continue;
     }
-    if (token === '--help' || token === '-h') {
-      out.help = true;
-      continue;
-    }
     if (token.startsWith('--')) {
       const [key, value] = token.slice(2).split('=');
       if (value !== undefined) {
         out[key] = value;
-      } else if (argv[i + 1] && !argv[i + 1].startsWith('--')) {
-        out[key] = argv[i + 1];
-        i += 1;
+      } else if (argv[index + 1] && !argv[index + 1].startsWith('--')) {
+        out[key] = argv[index + 1];
+        index += 1;
       } else {
         out[key] = true;
       }
@@ -514,33 +565,33 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`news-publisher — extensible multi-platform news publisher
+  console.log(`news-publisher — unified multi-channel news distributor
 
 Usage:
-  node scripts/news-publisher.mjs --publisher=x [--loop] [--dry-run] [--interval-minutes=60]
-                                  [--dashboard-port=7700]
+  node scripts/news-publisher.mjs [--dry-run] [--channels=x,discord]
 
-Core env vars (NP_ prefix):
-  NP_PUBLISHER            Publisher module name (required, e.g. "x")
-  NP_NEWS_API_BASE        News server base URL (required, e.g. http://localhost:6551)
-  NP_NEWS_LIMIT           Items per API page (default 100)
-  NP_NEWS_PAGE            API page number (default 1)
-  NP_NEWS_SEARCH_BODY     Extra JSON merged into /open/news_search body
-  NP_MAX_POST_ITEMS       Max posts per run (default 5)
-  NP_LOOKBACK_HOURS       Freshness window in hours (default 24)
-  NP_RETAIN_HOURS         State retention in hours (default 168 = 7 days)
-  NP_INTERVAL_MINUTES     Loop interval in minutes (default 60)
-  NP_STATE_PATH           State file path (default data/{publisher}-state.json)
-  NP_DRY_RUN              Truthy = dry run mode
-  NP_DASHBOARD_PORT       Dashboard HTTP port (default 0 = disabled)
+Core env vars:
+  NP_NEWS_API_BASE              News server base URL (required)
+  NP_CHANNELS                   Comma-separated channels (default: x,discord)
+  NP_LOOKBACK_HOURS             Freshness window in hours (default 24)
+  NP_RETAIN_HOURS               State retention in hours (default 168)
+  NP_STATE_PATH                 Distributor state file
+  NP_HISTORY_PATH               Delivery history file
+  NP_LOCK_PATH                  Run lock file
+  NP_CACHE_PATH                 World Monitor cache file
+  NP_CACHE_MAX_ITEMS            Cache item count (default 15)
+  NP_DRY_RUN                    Dry-run all channels
 
-Publisher-specific env vars depend on the selected publisher module.
-See publishers/*.mjs for details.
+Channel env vars:
+  NP_X_ENABLED                  Enable X posting
+  NP_X_MAX_POST_ITEMS           Max X posts per run
+  NP_DISCORD_ENABLED            Enable Discord digest posting
+  NP_DISCORD_MAX_POST_ITEMS     Max news items included in the Discord digest
+  NP_DISCORD_WEBHOOK_URL        Discord webhook URL
 
-Dashboard API (when NP_DASHBOARD_PORT is set):
-  GET  /              Dashboard UI
-  GET  /api/status    Publisher status & config
-  GET  /api/history   Recent post history
-  POST /api/run       Trigger a manual run
+Support env vars:
+  XBOT_URL                      x-bot service base URL for X delivery
+  UPSTASH_REDIS_REST_URL        Optional remote cache write
+  UPSTASH_REDIS_REST_TOKEN      Optional remote cache write
 `);
 }

@@ -1,65 +1,17 @@
 services:
-  news-publisher-x:
+  news-publisher:
     image: constructure-news-publisher:latest
     build: .
-    container_name: news-publisher-x
-    restart: unless-stopped
+    container_name: news-publisher
+    restart: "no"
     network_mode: host
     env_file:
       - path: ./.env.local
         required: false
     environment:
-      NP_PUBLISHER: "x"
-      NP_NEWS_API_BASE: "http://127.0.0.1:6551"
-      NP_MAX_POST_ITEMS: "5"
-      NP_INTERVAL_MINUTES: "60"
-      NP_LOOKBACK_HOURS: "24"
-      NP_STATE_PATH: "/data/x-state.json"
-      NP_DASHBOARD_PORT: "7701"
-      # Chrome runs on the host via scripts/start-chrome.sh
-      X_CDP_URL: "http://127.0.0.1:18810"
-      X_POST_DELAY_MS: "3000"
-    volumes:
-      - ./data:/data     # persists state, chrome-profile, and post history
-
-  news-publisher-x-bot:
-    image: constructure-news-publisher:latest
-    build: .
-    container_name: news-publisher-x-bot
-    restart: unless-stopped
-    network_mode: host
-    env_file:
-      - path: ./.env.local
-        required: false
-    environment:
-      NP_PUBLISHER: "x-bot"
-      NP_NEWS_API_BASE: "http://127.0.0.1:6551"
-      NP_MAX_POST_ITEMS: "3"
-      NP_INTERVAL_MINUTES: "120"
-      NP_LOOKBACK_HOURS: "24"
-      NP_STATE_PATH: "/data/x-bot-state.json"
-      NP_DASHBOARD_PORT: "7702"
-      X_CDP_URL: "http://127.0.0.1:18810"
-      X_POST_DELAY_MS: "5000"
-      XBOT_URL: "http://127.0.0.1:7710"
+      NP_STATE_PATH: "/data/distributor-state.json"
+      NP_HISTORY_PATH: "/data/distributor-history.json"
+      NP_LOCK_PATH: "/data/distributor-run.lock"
+      NP_CACHE_PATH: "/data/hourly-news-cache.json"
     volumes:
       - ./data:/data
-
-  # Example: add more publishers by duplicating the block above
-  #
-  # news-publisher-xiaohongshu:
-  #   image: constructure-news-publisher:latest
-  #   container_name: news-publisher-xiaohongshu
-  #   restart: unless-stopped
-  #   network_mode: host
-  #   env_file:
-  #     - path: ./.env.local
-  #       required: false
-  #   environment:
-  #     NP_PUBLISHER: "xiaohongshu"
-  #     NP_NEWS_API_BASE: "http://127.0.0.1:6551"
-  #     NP_MAX_POST_ITEMS: "3"
-  #     NP_INTERVAL_MINUTES: "120"
-  #     NP_STATE_PATH: "/data/xiaohongshu-state.json"
-  #   volumes:
-  #     - ./data:/data

@@ -11,4 +11,4 @@ COPY dashboard ./dashboard
 
 ENV NODE_ENV=production
 
-CMD ["node", "scripts/news-publisher.mjs", "--loop"]
+CMD ["node", "scripts/news-publisher.mjs"]

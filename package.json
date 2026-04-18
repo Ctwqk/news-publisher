@@ -7,7 +7,5 @@
     "run": "node scripts/news-publisher.mjs",
     "run:loop": "node scripts/news-publisher.mjs --loop"
   },
-  "dependencies": {
-    "playwright-core": "^1.51.0"
-  }
+  "dependencies": {}
 }

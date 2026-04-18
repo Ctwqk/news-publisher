@@ -15,16 +15,24 @@ const XBOT_URL = (process.env.XBOT_URL || 'http://127.0.0.1:7710').replace(/\/$/
 /* ------------------------------------------------------------------ */
 
 export async function validateConfig() {
+  if (isTruthy(process.env.NP_DRY_RUN) || isTruthy(process.env.NP_X_DRY_RUN)) {
+    console.log('[x-bot] Dry-run enabled; skipping backend health check');
+    return;
+  }
+
   let res;
   try {
-    res = await fetch(`${XBOT_URL}/health`, { signal: AbortSignal.timeout(5000) });
+    res = await fetch(`${XBOT_URL}/health`, { signal: AbortSignal.timeout(10000) });
   } catch (err) {
     throw new Error(`[x-bot] Cannot reach x-bot service at ${XBOT_URL}: ${err.message}`);
+  }
+  if (!res.ok) {
+    throw new Error(`[x-bot] Health check failed with HTTP ${res.status}`);
   }
   const data = await res.json();
   console.log(`[x-bot] Service ok — model: ${data.model}, cdp: ${data.cdp}`);
   if (!data.cdp) {
-    console.warn('[x-bot] Warning: CDP not reachable — run scripts/start-chrome.sh on host');
+    console.warn('[x-bot] Warning: backend reachable but /health reported cdp=false');
   }
 }
 
@@ -62,4 +70,8 @@ export async function post(payload, opts) {
   } catch (err) {
     return { ok: false, error: err.message };
   }
+}
+
+function isTruthy(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
 }
