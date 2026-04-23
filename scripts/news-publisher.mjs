@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 import { validatePublisher } from '../publishers/_interface.mjs';
 
-const CACHE_KEY = 'worldmonitor:hourly-news:latest';
+const CACHE_KEY = 'news:publisher:latest';
 const MAX_RECENT_POSTS = 120;
 const DEFAULT_CHANNELS = ['x', 'discord'];
 const DEFAULT_CHANNEL_LIMITS = {
@@ -479,7 +479,7 @@ function writeJson(path, payload) {
 }
 
 function getDiscordWebhookUrl() {
-  return String(process.env.NP_DISCORD_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL || process.env.WM_DISCORD_WEBHOOK_URL || '').trim();
+  return String(process.env.NP_DISCORD_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL || '').trim();
 }
 
 function safeHostname(url) {

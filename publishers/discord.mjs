@@ -64,13 +64,12 @@ function getWebhookUrl() {
   return String(
     process.env.NP_DISCORD_WEBHOOK_URL
     || process.env.DISCORD_WEBHOOK_URL
-    || process.env.WM_DISCORD_WEBHOOK_URL
     || '',
   ).trim();
 }
 
 function buildDiscordMessage(items, generatedAt) {
-  const header = `WorldMonitor Hourly Update (${generatedAt})`;
+  const header = `News Digest (${generatedAt})`;
   const lines = items.flatMap((item) => [
     `- [${item.source}] ${truncate(item.title, 220)}`,
     item.link ? `  ${item.link}` : null,
